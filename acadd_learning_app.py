@@ -33,6 +33,9 @@ class Course(db.Model):
     description = db.Column(db.Text, nullable=False)
     prix = db.Column(db.Float, default=0.0)
     statut = db.Column(db.String(50), default='À venir')
+    formateur_nom = db.Column(db.String(120), nullable=True)
+    formateur_email = db.Column(db.String(120), nullable=True)
+    validation_status = db.Column(db.String(50), nullable=False, default='Approuvée')
     steps = db.relationship('CourseStep', backref='course', lazy=True, cascade='all, delete-orphan')
     inscriptions = db.relationship('Enrollment', backref='course', lazy=True)
 
@@ -85,6 +88,8 @@ HTML_BASE = """
                 <a class="nav-link" href="/">Catalogue</a>
                 <a class="nav-link" href="/dashboard">Mon espace</a>
                 <a class="nav-link" href="/profil">Profil</a>
+                <a class="nav-link" href="/formateur">Espace formateur</a>
+                <a class="nav-link" href="/admin">Validation ACADD</a>
             </div>
         </div>
     </nav>
@@ -361,6 +366,52 @@ HTML_DASHBOARD = """
 {% endif %}
 """
 
+HTML_FORMATEUR = """
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        <div class="card border-0 shadow-sm rounded-4">
+            <div class="card-body p-4">
+                <h2 class="fw-bold">Proposer une formation</h2>
+                <p class="text-muted">Votre formation sera vérifiée par l'équipe ACADD avant d'être publiée.</p>
+                <form method="POST">
+                    <div class="row g-3">
+                        <div class="col-md-6"><label class="form-label">Nom du formateur *</label><input name="formateur_nom" class="form-control" required></div>
+                        <div class="col-md-6"><label class="form-label">E-mail *</label><input type="email" name="formateur_email" class="form-control" required></div>
+                        <div class="col-md-8"><label class="form-label">Titre de la formation *</label><input name="titre" class="form-control" required></div>
+                        <div class="col-md-4"><label class="form-label">Catégorie *</label><input name="categorie" class="form-control" placeholder="IA, Web..." required></div>
+                        <div class="col-md-4"><label class="form-label">Niveau *</label><select name="niveau" class="form-select" required><option>Débutant</option><option>Intermédiaire</option><option>Professionnel</option></select></div>
+                        <div class="col-md-4"><label class="form-label">Durée (jours) *</label><input type="number" name="duree_jours" min="1" max="365" class="form-control" required></div>
+                        <div class="col-md-4"><label class="form-label">Prix (FCFA) *</label><input type="number" name="prix" min="15000" max="90000" step="1000" class="form-control" required></div>
+                        <div class="col-12"><label class="form-label">Description *</label><textarea name="description" rows="5" class="form-control" required></textarea></div>
+                    </div>
+                    <button class="btn btn-acadd mt-4">Soumettre à ACADD</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+"""
+
+HTML_ADMIN = """
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div><h2 class="fw-bold mb-1">Validation des formations</h2><p class="text-muted mb-0">Les formations ne sont publiques qu'après validation ACADD.</p></div>
+    <a href="/formateur" class="btn btn-outline-primary">Espace formateur</a>
+</div>
+{% if pending %}
+<div class="row g-4">
+{% for course in pending %}
+<div class="col-lg-6"><div class="card border-0 shadow-sm rounded-4 h-100"><div class="card-body">
+    <span class="badge bg-warning text-dark mb-2">En attente</span>
+    <h4>{{ course.titre }}</h4><p class="text-muted">{{ course.description }}</p>
+    <p class="small mb-3"><strong>Formateur :</strong> {{ course.formateur_nom }} ({{ course.formateur_email }})<br><strong>Niveau :</strong> {{ course.niveau }} • <strong>Prix :</strong> {{ "{:,.0f}".format(course.prix).replace(",", " ") }} FCFA</p>
+    <form method="POST" action="/admin/formation/{{ course.id }}/valider" class="d-inline"><button class="btn btn-success">Valider et publier</button></form>
+    <form method="POST" action="/admin/formation/{{ course.id }}/refuser" class="d-inline"><button class="btn btn-outline-danger">Refuser</button></form>
+</div></div></div>
+{% endfor %}
+</div>
+{% else %}<div class="alert alert-success">Aucune formation en attente de validation.</div>{% endif %}
+"""
+
 
 @app.route('/')
 def index():
@@ -368,7 +419,7 @@ def index():
     enterprise = session.get('enterprise', '')
     niveau = session.get('niveau', 'Débutant')
     levels = ['Débutant', 'Intermédiaire', 'Professionnel']
-    courses = Course.query.order_by(Course.id).all()
+    courses = Course.query.filter_by(validation_status='Approuvée').order_by(Course.id).all()
 
     total_courses = Course.query.count()
     total_enrollments = Enrollment.query.count()
@@ -454,6 +505,9 @@ def profil():
 @app.route('/cours/<int:course_id>')
 def course_detail(course_id):
     course = Course.query.get_or_404(course_id)
+    if course.validation_status != 'Approuvée':
+        flash('Cette formation est encore en cours de validation.', 'warning')
+        return redirect(url_for('index'))
     content = render_template_string(HTML_COURSE_DETAIL, course=course)
     return render_template_string(HTML_BASE, body_content=content)
 
@@ -521,6 +575,78 @@ def update_progress(course_id):
     return redirect(url_for('dashboard'))
 
 
+@app.route('/formateur', methods=['GET', 'POST'])
+def formateur():
+    if request.method == 'POST':
+        formateur_nom = (request.form.get('formateur_nom') or '').strip()
+        formateur_email = (request.form.get('formateur_email') or '').strip()
+        titre = (request.form.get('titre') or '').strip()
+        categorie = (request.form.get('categorie') or '').strip()
+        niveau = request.form.get('niveau', 'Débutant')
+        description = (request.form.get('description') or '').strip()
+        try:
+            duree_jours = int(request.form.get('duree_jours', '0'))
+            prix = int(request.form.get('prix', '0'))
+        except ValueError:
+            flash('La durée et le prix doivent être des nombres valides.', 'danger')
+            return redirect(url_for('formateur'))
+        if not all([formateur_nom, formateur_email, titre, categorie, description]):
+            flash('Tous les champs obligatoires doivent être remplis.', 'danger')
+            return redirect(url_for('formateur'))
+        if niveau not in {'Débutant', 'Intermédiaire', 'Professionnel'} or not 1 <= duree_jours <= 365 or not 15000 <= prix <= 90000:
+            flash('Vérifiez le niveau, la durée et le prix (15 000 à 90 000 FCFA).', 'danger')
+            return redirect(url_for('formateur'))
+        course = Course(
+            titre=titre, categorie=categorie, niveau=niveau, duree_jours=duree_jours,
+            public_cible='À définir', modalite='En ligne', description=description,
+            prix=prix, statut='En attente', validation_status='En attente',
+            formateur_nom=formateur_nom, formateur_email=formateur_email,
+        )
+        db.session.add(course)
+        db.session.commit()
+        flash('Formation envoyée. Elle sera visible après validation par ACADD.', 'success')
+        return redirect(url_for('formateur'))
+    content = render_template_string(HTML_FORMATEUR)
+    return render_template_string(HTML_BASE, body_content=content)
+
+
+@app.route('/admin', methods=['GET', 'POST'])
+def admin():
+    if request.method == 'POST':
+        if request.form.get('code') != os.environ.get('ADMIN_CODE', 'ACADD2026'):
+            flash('Code administrateur incorrect.', 'danger')
+            return redirect(url_for('admin'))
+        session['is_admin'] = True
+        return redirect(url_for('admin'))
+    if not session.get('is_admin'):
+        content = """
+        <div class="row justify-content-center"><div class="col-md-5"><div class="card border-0 shadow-sm rounded-4 p-4">
+        <h2 class="fw-bold">Accès administrateur ACADD</h2><p class="text-muted">Entrez le code de validation.</p>
+        <form method="POST"><input type="password" name="code" class="form-control mb-3" placeholder="Code administrateur" required><button class="btn btn-acadd w-100">Se connecter</button></form>
+        </div></div></div>
+        """
+        return render_template_string(HTML_BASE, body_content=content)
+    pending = Course.query.filter_by(validation_status='En attente').order_by(Course.id.desc()).all()
+    content = render_template_string(HTML_ADMIN, pending=pending)
+    return render_template_string(HTML_BASE, body_content=content)
+
+
+@app.route('/admin/formation/<int:course_id>/<action>', methods=['POST'])
+def moderate_course(course_id, action):
+    if not session.get('is_admin'):
+        flash('Accès administrateur requis.', 'danger')
+        return redirect(url_for('admin'))
+    course = Course.query.get_or_404(course_id)
+    if course.validation_status != 'En attente' or action not in {'valider', 'refuser'}:
+        flash('Action de validation invalide.', 'danger')
+        return redirect(url_for('admin'))
+    course.validation_status = 'Approuvée' if action == 'valider' else 'Refusée'
+    course.statut = 'Ouvert' if action == 'valider' else 'Refusée'
+    db.session.commit()
+    flash('Formation publiée.' if action == 'valider' else 'Formation refusée.', 'success' if action == 'valider' else 'warning')
+    return redirect(url_for('admin'))
+
+
 def init_db():
     with app.app_context():
         db.create_all()
@@ -531,6 +657,17 @@ def init_db():
                 "ALTER TABLE user ADD COLUMN niveau VARCHAR(50) NOT NULL DEFAULT 'Débutant'"
             ))
             db.session.commit()
+
+        course_columns = {column['name'] for column in inspect(db.engine).get_columns('course')}
+        migrations = {
+            'formateur_nom': "ALTER TABLE course ADD COLUMN formateur_nom VARCHAR(120)",
+            'formateur_email': "ALTER TABLE course ADD COLUMN formateur_email VARCHAR(120)",
+            'validation_status': "ALTER TABLE course ADD COLUMN validation_status VARCHAR(50) NOT NULL DEFAULT 'Approuvée'",
+        }
+        for column, statement in migrations.items():
+            if column not in course_columns:
+                db.session.execute(text(statement))
+        db.session.commit()
 
         if not Course.query.first():
             courses = [
