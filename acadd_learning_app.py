@@ -1,0 +1,679 @@
+import os
+from datetime import datetime
+
+from flask import Flask, flash, redirect, render_template_string, request, session, url_for
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import inspect, text
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'acadd_learning_secret_key_2026')
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///acadd_learning_app.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    nom = db.Column(db.String(120), nullable=False, unique=True)
+    entreprise = db.Column(db.String(120), nullable=True)
+    niveau = db.Column(db.String(50), nullable=False, default='Débutant')
+    date_creation = db.Column(db.DateTime, default=datetime.utcnow)
+    inscriptions = db.relationship('Enrollment', backref='user', lazy=True)
+
+
+class Course(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    titre = db.Column(db.String(180), nullable=False)
+    categorie = db.Column(db.String(80), nullable=False)
+    niveau = db.Column(db.String(50), nullable=False)
+    duree_jours = db.Column(db.Integer, nullable=False)
+    public_cible = db.Column(db.String(120), nullable=True)
+    modalite = db.Column(db.String(80), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    prix = db.Column(db.Float, default=0.0)
+    statut = db.Column(db.String(50), default='À venir')
+    steps = db.relationship('CourseStep', backref='course', lazy=True, cascade='all, delete-orphan')
+    inscriptions = db.relationship('Enrollment', backref='course', lazy=True)
+
+
+class CourseStep(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    course_id = db.Column(db.Integer, db.ForeignKey('course.id'), nullable=False)
+    ordre = db.Column(db.Integer, nullable=False)
+    titre = db.Column(db.String(180), nullable=False)
+    duree_min = db.Column(db.Integer, nullable=False)
+    type_module = db.Column(db.String(80), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+
+
+class Enrollment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    course_id = db.Column(db.Integer, db.ForeignKey('course.id'), nullable=False)
+    date_inscription = db.Column(db.DateTime, default=datetime.utcnow)
+    progress = db.Column(db.Integer, default=0)
+    statut = db.Column(db.String(50), default='En cours')
+
+
+HTML_BASE = """
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ACADD Learning</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <style>
+        body { background: linear-gradient(180deg, #f4f8ff 0%, #eef3ff 100%); }
+        .navbar { background: linear-gradient(90deg, #101d5d, #1d4ed8); }
+        .hero { background: linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(29, 78, 216, 0.90)); color: white; border-radius: 24px; }
+        .course-card { border: none; border-radius: 18px; box-shadow: 0 12px 30px rgba(30,41,59,0.08); transition: transform 0.2s ease; }
+        .course-card:hover { transform: translateY(-3px); }
+        .badge-acadd { background: #dbeafe; color: #1d4ed8; }
+        .progress { height: 12px; }
+        .btn-acadd { background: #1d4ed8; border-color: #1d4ed8; }
+        .btn-acadd:hover { background: #1e40af; border-color: #1e40af; }
+        .icon-box { width: 52px; height: 52px; border-radius: 14px; display: flex; align-items: center; justify-content: center; background: #edf2ff; color: #1d4ed8; font-size: 1.4rem; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark shadow-sm">
+        <div class="container">
+            <a class="navbar-brand fw-bold" href="/">ACADD Learning</a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/">Catalogue</a>
+                <a class="nav-link" href="/dashboard">Mon espace</a>
+                <a class="nav-link" href="/profil">Profil</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container py-4">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {{ body_content | safe }}
+    </div>
+</body>
+</html>
+"""
+
+HTML_HOME = """
+<section class="hero p-4 p-lg-5 mb-4">
+    <div class="row align-items-center">
+        <div class="col-lg-7">
+            <span class="badge badge-acadd px-3 py-2 mb-3">ACADD • Formation en ligne</span>
+            <h1 class="display-6 fw-bold mb-3">Apprends le numérique, l’IA et le web à ton rythme</h1>
+            <p class="lead text-white-50 mb-4">
+                Suis des formations pratiques, certifiantes et accessibles en ligne, avec suivi de progression et accompagnement personnalisé.
+            </p>
+            <p class="mb-4 fw-semibold">Tarifs adaptés au niveau : de 15 000 à 90 000 FCFA.</p>
+            <div class="d-flex gap-3 flex-wrap">
+                <a href="#catalogue" class="btn btn-light btn-lg">Découvrir les formations</a>
+                <a href="/dashboard" class="btn btn-outline-light btn-lg">Voir mon parcours</a>
+            </div>
+        </div>
+        <div class="col-lg-5 mt-4 mt-lg-0">
+            <div class="bg-white text-dark rounded-4 p-4 shadow">
+                <h5 class="fw-bold mb-3">Bienvenue {{ user_name }}</h5>
+                <form method="POST" action="/profil">
+                    <div class="mb-3">
+                        <label class="form-label">Votre nom</label>
+                        <input type="text" name="nom" class="form-control" value="{{ user_name }}" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Votre structure</label>
+                        <input type="text" name="entreprise" class="form-control" placeholder="Orange Digital Center, ACADD, ..." value="{{ entreprise }}">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Votre niveau</label>
+                        <select name="niveau" class="form-select" required>
+                            {% for level in levels %}
+                            <option value="{{ level }}" {% if niveau == level %}selected{% endif %}>{{ level }}</option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">Ce choix nous aide à vous orienter vers les formations adaptées.</div>
+                    </div>
+                    <button type="submit" class="btn btn-acadd w-100">Enregistrer le profil</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</section>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm rounded-4 h-100">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="icon-box">📘</div>
+                <div>
+                    <div class="text-muted small">Formations</div>
+                    <div class="fs-4 fw-bold">{{ total_courses }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm rounded-4 h-100">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="icon-box">🎯</div>
+                <div>
+                    <div class="text-muted small">Inscrits</div>
+                    <div class="fs-4 fw-bold">{{ total_enrollments }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm rounded-4 h-100">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="icon-box">📈</div>
+                <div>
+                    <div class="text-muted small">Progression moyenne</div>
+                    <div class="fs-4 fw-bold">{{ avg_progress }}%</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm rounded-4 h-100">
+            <div class="card-body d-flex align-items-center gap-3">
+                <div class="icon-box">✅</div>
+                <div>
+                    <div class="text-muted small">Terminé</div>
+                    <div class="fs-4 fw-bold">{{ completed_courses }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="catalogue" class="mb-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="fw-bold mb-0">Catalogue des formations</h2>
+    </div>
+    <div class="row g-4">
+        {% for course in courses %}
+        <div class="col-lg-4 col-md-6">
+            <div class="card course-card h-100">
+                <div class="card-body d-flex flex-column">
+                    <div class="d-flex justify-content-between align-items-start mb-3">
+                        <span class="badge bg-primary-subtle text-primary-emphasis rounded-pill px-3 py-2">{{ course.categorie }}</span>
+                        <span class="text-muted small">{{ course.duree_jours }} jours</span>
+                    </div>
+                    <h4 class="fw-bold mb-2">{{ course.titre }}</h4>
+                    <p class="text-muted small mb-3">{{ course.description }}</p>
+                    <ul class="list-inline small text-muted mb-3">
+                        <li class="list-inline-item">Niveau: <strong>{{ course.niveau }}</strong></li>
+                        <li class="list-inline-item">•</li>
+                        <li class="list-inline-item">Public: {{ course.public_cible }}</li>
+                    </ul>
+                    <div class="mt-auto">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <span class="fw-bold text-primary">{{ course.modalite }}</span>
+                            <span class="fw-bold">{{ "{:,.0f}".format(course.prix).replace(",", " ") }} FCFA</span>
+                        </div>
+                        <div class="d-grid gap-2 d-md-block">
+                            <a href="/cours/{{ course.id }}" class="btn btn-outline-primary">Voir les détails</a>
+                            <a href="/inscrire/{{ course.id }}" class="btn btn-acadd">S'inscrire</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+"""
+
+HTML_COURSE_DETAIL = """
+<div class="row g-4">
+    <div class="col-lg-8">
+        <div class="card border-0 shadow-sm rounded-4 mb-4">
+            <div class="card-body p-4">
+                <div class="d-flex justify-content-between align-items-start mb-3 flex-wrap gap-2">
+                    <div>
+                        <span class="badge bg-primary-subtle text-primary-emphasis px-3 py-2 mb-2">{{ course.categorie }}</span>
+                        <h1 class="fw-bold mb-1">{{ course.titre }}</h1>
+                    </div>
+                    <span class="badge bg-success text-white px-3 py-2">{{ course.statut }}</span>
+                </div>
+                <p class="lead text-muted">{{ course.description }}</p>
+
+                <div class="row mb-4 g-3">
+                    <div class="col-md-3">
+                        <div class="bg-light rounded-3 p-3">
+                            <small class="text-muted d-block">Durée</small>
+                            <strong>{{ course.duree_jours }} jours</strong>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="bg-light rounded-3 p-3">
+                            <small class="text-muted d-block">Niveau</small>
+                            <strong>{{ course.niveau }}</strong>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="bg-light rounded-3 p-3">
+                            <small class="text-muted d-block">Modalité</small>
+                            <strong>{{ course.modalite }}</strong>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="bg-light rounded-3 p-3">
+                            <small class="text-muted d-block">Prix</small>
+                            <strong>{{ "{:,.0f}".format(course.prix).replace(",", " ") }} FCFA</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <h3 class="fw-bold mb-3">Programme du cours</h3>
+                <div class="list-group">
+                    {% for step in course.steps %}
+                    <div class="list-group-item border-0 rounded-3 mb-2 shadow-sm">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <div class="fw-bold">Module {{ step.ordre }} : {{ step.titre }}</div>
+                                <small class="text-muted">{{ step.type_module }} • {{ step.duree_min }} min</small>
+                            </div>
+                            <span class="badge bg-light text-dark">{{ step.type_module }}</span>
+                        </div>
+                        {% if step.description %}
+                        <p class="mb-0 mt-2 text-muted small">{{ step.description }}</p>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <div class="card border-0 shadow-sm rounded-4 p-3 sticky-top" style="top: 20px;">
+            <h4 class="fw-bold mb-3">Enregistrer mon parcours</h4>
+            <p class="text-muted">Commencez ce parcours en ligne et suivez votre progression sur votre espace personnel.</p>
+            <a href="/inscrire/{{ course.id }}" class="btn btn-acadd w-100 mb-2">S'inscrire maintenant</a>
+            <a href="/" class="btn btn-outline-secondary w-100">Retour au catalogue</a>
+        </div>
+    </div>
+</div>
+"""
+
+HTML_DASHBOARD = """
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
+    <div>
+        <h2 class="fw-bold mb-1">Mon espace d'apprentissage</h2>
+        <p class="text-muted mb-0">Bonjour {{ user_name }}, niveau sélectionné : <strong>{{ niveau }}</strong>.</p>
+    </div>
+    <a href="/" class="btn btn-acadd">Découvrir d'autres formations</a>
+</div>
+
+{% if inscriptions %}
+<div class="row g-4">
+    {% for enrollment in inscriptions %}
+    <div class="col-lg-6">
+        <div class="card border-0 shadow-sm rounded-4 h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-start mb-3">
+                    <div>
+                        <span class="badge bg-primary-subtle text-primary-emphasis mb-2">{{ enrollment.course.categorie }}</span>
+                        <h4 class="mb-1">{{ enrollment.course.titre }}</h4>
+                    </div>
+                    <span class="badge bg-success text-white">{{ enrollment.statut }}</span>
+                </div>
+
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between small text-muted mb-1">
+                        <span>Progression</span>
+                        <strong>{{ enrollment.progress }}%</strong>
+                    </div>
+                    <div class="progress">
+                        <div class="progress-bar bg-success" role="progressbar" style="width: {{ enrollment.progress }}%"></div>
+                    </div>
+                </div>
+
+                <form method="POST" action="/progress/{{ enrollment.course.id }}">
+                    <label class="form-label small text-muted">Mettre à jour votre progression</label>
+                    <div class="input-group">
+                        <input type="range" min="0" max="100" value="{{ enrollment.progress }}" name="progress" class="form-range w-100" id="progress-{{ enrollment.id }}">
+                        <button type="submit" class="btn btn-acadd">Valider</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="card border-0 shadow-sm rounded-4 p-5 text-center">
+    <h4 class="mb-3">Aucune formation suivie pour le moment</h4>
+    <p class="text-muted mb-4">Choisissez une formation dans le catalogue pour commencer votre parcours ACADD.</p>
+    <a href="/" class="btn btn-acadd">Explorer les formations</a>
+</div>
+{% endif %}
+"""
+
+
+@app.route('/')
+def index():
+    user_name = session.get('user_name', 'Apprenant')
+    enterprise = session.get('enterprise', '')
+    niveau = session.get('niveau', 'Débutant')
+    levels = ['Débutant', 'Intermédiaire', 'Professionnel']
+    courses = Course.query.order_by(Course.id).all()
+
+    total_courses = Course.query.count()
+    total_enrollments = Enrollment.query.count()
+    avg_progress = 0
+    if total_enrollments:
+        avg_progress = round(sum(e.progress for e in Enrollment.query.all()) / total_enrollments)
+    completed_courses = Enrollment.query.filter(Enrollment.progress >= 100).count()
+
+    content = render_template_string(
+        HTML_HOME,
+        courses=courses,
+        total_courses=total_courses,
+        total_enrollments=total_enrollments,
+        avg_progress=avg_progress,
+        completed_courses=completed_courses,
+        user_name=user_name,
+        entreprise=enterprise,
+        niveau=niveau,
+        levels=levels,
+    )
+    return render_template_string(HTML_BASE, body_content=content)
+
+
+@app.route('/profil', methods=['POST', 'GET'])
+def profil():
+    if request.method == 'POST':
+        nom = (request.form.get('nom') or '').strip()
+        entreprise = (request.form.get('entreprise') or '').strip()
+        niveau = request.form.get('niveau', 'Débutant')
+        levels = {'Débutant', 'Intermédiaire', 'Professionnel'}
+        if not nom:
+            flash('Le nom est obligatoire pour personnaliser votre parcours.', 'danger')
+            return redirect(url_for('index'))
+        if niveau not in levels:
+            flash('Le niveau sélectionné est invalide.', 'danger')
+            return redirect(url_for('index'))
+        session['user_name'] = nom
+        session['enterprise'] = entreprise
+        session['niveau'] = niveau
+        user = User.query.filter_by(nom=nom).first()
+        if not user:
+            user = User(nom=nom, entreprise=entreprise, niveau=niveau)
+            db.session.add(user)
+        else:
+            user.entreprise = entreprise
+            user.niveau = niveau
+        db.session.commit()
+        flash(f'Profil enregistré pour {nom}.', 'success')
+        return redirect(url_for('index'))
+
+    user_name = session.get('user_name', 'Apprenant')
+    enterprise = session.get('enterprise', '')
+    niveau = session.get('niveau', 'Débutant')
+    return render_template_string(
+        HTML_BASE,
+        body_content=f"""
+        <div class='card border-0 shadow-sm rounded-4 p-4'>
+            <h2 class='fw-bold mb-3'>Mon profil</h2>
+            <form method='POST'>
+                <div class='mb-3'>
+                    <label class='form-label'>Nom</label>
+                    <input type='text' class='form-control' name='nom' value='{user_name}' required>
+                </div>
+                <div class='mb-3'>
+                    <label class='form-label'>Entreprise</label>
+                    <input type='text' class='form-control' name='entreprise' value='{enterprise}'>
+                </div>
+                <div class='mb-3'>
+                    <label class='form-label'>Niveau</label>
+                    <select class='form-select' name='niveau' required>
+                        <option value='Débutant' {'selected' if niveau == 'Débutant' else ''}>Débutant</option>
+                        <option value='Intermédiaire' {'selected' if niveau == 'Intermédiaire' else ''}>Intermédiaire</option>
+                        <option value='Professionnel' {'selected' if niveau == 'Professionnel' else ''}>Professionnel</option>
+                    </select>
+                </div>
+                <button type='submit' class='btn btn-acadd'>Sauvegarder</button>
+            </form>
+        </div>
+        """
+    )
+
+
+@app.route('/cours/<int:course_id>')
+def course_detail(course_id):
+    course = Course.query.get_or_404(course_id)
+    content = render_template_string(HTML_COURSE_DETAIL, course=course)
+    return render_template_string(HTML_BASE, body_content=content)
+
+
+@app.route('/inscrire/<int:course_id>')
+def inscrire(course_id):
+    course = Course.query.get_or_404(course_id)
+    user_name = session.get('user_name', 'Apprenant')
+    user = User.query.filter_by(nom=user_name).first()
+    if not user:
+        user = User(
+            nom=user_name,
+            entreprise=session.get('enterprise', ''),
+            niveau=session.get('niveau', 'Débutant'),
+        )
+        db.session.add(user)
+        db.session.commit()
+
+    exists = Enrollment.query.filter_by(user_id=user.id, course_id=course.id).first()
+    if exists:
+        flash(f'Vous êtes déjà inscrit à la formation "{course.titre}".', 'info')
+        return redirect(url_for('dashboard'))
+
+    enrollment = Enrollment(user_id=user.id, course_id=course.id, progress=0, statut='En cours')
+    db.session.add(enrollment)
+    db.session.commit()
+    flash(f'Inscription réussie : {course.titre}.', 'success')
+    return redirect(url_for('dashboard'))
+
+
+@app.route('/dashboard')
+def dashboard():
+    user_name = session.get('user_name', 'Apprenant')
+    niveau = session.get('niveau', 'Débutant')
+    user = User.query.filter_by(nom=user_name).first()
+    inscriptions = []
+    if user:
+        niveau = user.niveau
+        session['niveau'] = niveau
+        inscriptions = Enrollment.query.filter_by(user_id=user.id).order_by(Enrollment.date_inscription.desc()).all()
+
+    content = render_template_string(HTML_DASHBOARD, user_name=user_name, niveau=niveau, inscriptions=inscriptions)
+    return render_template_string(HTML_BASE, body_content=content)
+
+
+@app.route('/progress/<int:course_id>', methods=['POST'])
+def update_progress(course_id):
+    user_name = session.get('user_name', 'Apprenant')
+    user = User.query.filter_by(nom=user_name).first()
+    if not user:
+        flash('Veuillez enregistrer votre profil avant de suivre une formation.', 'warning')
+        return redirect(url_for('index'))
+
+    enrollment = Enrollment.query.filter_by(user_id=user.id, course_id=course_id).first()
+    if not enrollment:
+        flash('Cette formation n’est pas dans votre parcours.', 'danger')
+        return redirect(url_for('dashboard'))
+
+    new_progress = max(0, min(100, int(request.form.get('progress', 0))))
+    enrollment.progress = new_progress
+    enrollment.statut = 'Terminé' if new_progress >= 100 else 'En cours'
+    db.session.commit()
+
+    flash(f'Progression mise à jour : {new_progress}%.', 'success')
+    return redirect(url_for('dashboard'))
+
+
+def init_db():
+    with app.app_context():
+        db.create_all()
+
+        user_columns = {column['name'] for column in inspect(db.engine).get_columns('user')}
+        if 'niveau' not in user_columns:
+            db.session.execute(text(
+                "ALTER TABLE user ADD COLUMN niveau VARCHAR(50) NOT NULL DEFAULT 'Débutant'"
+            ))
+            db.session.commit()
+
+        if not Course.query.first():
+            courses = [
+                Course(
+                    titre='Culture numérique & citoyenneté digitale',
+                    categorie='Numérique',
+                    niveau='Débutant',
+                    duree_jours=2,
+                    public_cible='Grand public',
+                    modalite='En ligne + mentorat',
+                    description='Découvrez les usages du numérique, la sécurité en ligne, la citoyenneté numérique et les outils indispensables au quotidien.',
+                    prix=15000,
+                    statut='Ouvert'
+                ),
+                Course(
+                    titre='Initiation à l’IA générative',
+                    categorie='IA',
+                    niveau='Débutant',
+                    duree_jours=3,
+                    public_cible='Tous',
+                    modalite='En ligne asynchrone',
+                    description='Apprenez à utiliser les outils d’IA pour la recherche, la création de contenu, l’analyse rapide et l’automatisation de tâches.',
+                    prix=25000,
+                    statut='Populaire'
+                ),
+                Course(
+                    titre='Créer un site web avec WordPress',
+                    categorie='Web',
+                    niveau='Intermédiaire',
+                    duree_jours=4,
+                    public_cible='Tous',
+                    modalite='En ligne',
+                    description='Créez un site web professionnel, personnalisez le design et publiez votre présence en ligne sans savoir coder.',
+                    prix=45000,
+                    statut='À venir'
+                ),
+                Course(
+                    titre='Marketing digital & réseaux sociaux',
+                    categorie='Marketing',
+                    niveau='Intermédiaire',
+                    duree_jours=3,
+                    public_cible='Entrepreneurs',
+                    modalite='En ligne',
+                    description='Développez une stratégie marketing sur les réseaux sociaux, pilotez des campagnes et mesurez les résultats.',
+                    prix=60000,
+                    statut='À venir'
+                ),
+                Course(
+                    titre='Sécurité informatique pour tous',
+                    categorie='Cybersécurité',
+                    niveau='Débutant',
+                    duree_jours=2,
+                    public_cible='Tout public',
+                    modalite='En ligne',
+                    description='Comprenez les bons réflexes pour sécuriser ses comptes, ses données et ses appareils personnels.',
+                    prix=30000,
+                    statut='Ouvert'
+                ),
+                Course(
+                    titre='Automation des tâches avec AI & outils no-code',
+                    categorie='Productivité',
+                    niveau='Professionnel',
+                    duree_jours=5,
+                    public_cible='Professionnels',
+                    modalite='En ligne live',
+                    description='Automatisez les tâches répétitives en utilisant l’IA et des outils no-code pour gagner du temps et améliorer la productivité.',
+                    prix=90000,
+                    statut='Nouveau'
+                ),
+            ]
+
+            db.session.add_all(courses)
+            db.session.commit()
+
+            step_templates = [
+                ('Culture numérique & citoyenneté digitale', [
+                    ('Découvrir le numérique', 25, 'Comprendre les bases', 'Introduction au numérique et à son impact dans la vie quotidienne.'),
+                    ('Sécurité en ligne', 35, 'Pratique', 'Créer des mots de passe sûrs et protéger ses informations personnelles.'),
+                    ('Citoyenneté digitale', 30, 'Atelier', 'Comprendre les droits, les devoirs et les usages responsables du numérique.')
+                ]),
+                ('Initiation à l’IA générative', [
+                    ('Les bases de l’IA', 30, 'Cours', 'Comprendre le fonctionnement simple et utile des systèmes d’intelligence artificielle.'),
+                    ('Utiliser ChatGPT et outils IA', 45, 'Pratique', 'Rédiger, résumer, rechercher et générer des idées avec efficacité.'),
+                    ('Cas d’usage professionnels', 35, 'Projet', 'Identifier les usages utiles de l’IA au travail et dans l’éducation.')
+                ]),
+                ('Créer un site web avec WordPress', [
+                    ('Installer WordPress', 30, 'Guide', 'Déployer un site localement et configurer les premiers paramètres.'),
+                    ('Créer des pages & contenus', 45, 'Pratique', 'Structurer un site, écrire des contenus et organiser une navigation claire.'),
+                    ('Personnaliser et publier', 40, 'Projet', 'Choisir un thème, optimiser le site et le mettre en ligne.')
+                ]),
+                ('Marketing digital & réseaux sociaux', [
+                    ('Stratégie marketing', 30, 'Cours', 'Définir un plan d’action autour de vos objectifs clients.'),
+                    ('Réseaux sociaux', 40, 'Atelier', 'Produire un contenu engageant et cohérent par canal.'),
+                    ('Mesure de performance', 20, 'Analyse', 'Suivre les indicateurs clés et ajuster la stratégie.')
+                ]),
+                ('Sécurité informatique pour tous', [
+                    ('Risques et menaces', 25, 'Cours', 'Identifier les cybermenaces classiques et les signes d’alerte.'),
+                    ('Protection des comptes', 30, 'Pratique', 'Mettre en place une meilleure sécurité sur les identités numériques.'),
+                    ('Bonnes pratiques', 25, 'Atelier', 'Adopter des habitudes sûres pour protéger ses appareils et ses données.')
+                ]),
+                ('Automation des tâches avec AI & outils no-code', [
+                    ('Identifier les tâches répétitives', 30, 'Diagnostic', 'Repérer les tâches qui peuvent être automatisées.'),
+                    ('Construire des workflows', 45, 'Pratique', 'Créer des flux de travail simples à l’aide d’outils no-code.'),
+                    ('Pilotage et optimisation', 35, 'Projet', 'Mettre en place des indicateurs et améliorer progressivement les processus.')
+                ]),
+            ]
+
+            for course in courses:
+                entry = step_templates.pop(0) if step_templates else None
+                if entry and entry[0] == course.titre:
+                    for idx, (title, duration, kind, desc) in enumerate(entry[1], start=1):
+                        step = CourseStep(
+                            course_id=course.id,
+                            ordre=idx,
+                            titre=title,
+                            duree_min=duration,
+                            type_module=kind,
+                            description=desc,
+                        )
+                        db.session.add(step)
+            db.session.commit()
+
+        prices_and_levels = {
+            'Culture numérique & citoyenneté digitale': (15000, 'Débutant'),
+            'Initiation à l’IA générative': (25000, 'Débutant'),
+            'Créer un site web avec WordPress': (45000, 'Intermédiaire'),
+            'Marketing digital & réseaux sociaux': (60000, 'Intermédiaire'),
+            'Sécurité informatique pour tous': (30000, 'Débutant'),
+            'Automation des tâches avec AI & outils no-code': (90000, 'Professionnel'),
+        }
+        for title, (price, level) in prices_and_levels.items():
+            course = Course.query.filter_by(titre=title).first()
+            if course:
+                course.prix = price
+                course.niveau = level
+        db.session.commit()
+
+
+if __name__ == '__main__':
+    init_db()
+    print('Application ACADD Learning démarrée sur http://127.0.0.1:5000')
+    app.run(
+        host='0.0.0.0',
+        port=int(os.environ.get('PORT', '5000')),
+        debug=os.environ.get('FLASK_DEBUG', '').lower() == 'true',
+    )
