@@ -59,6 +59,19 @@ class Enrollment(db.Model):
     statut = db.Column(db.String(50), default='En cours')
 
 
+class PaymentRequest(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    course_id = db.Column(db.Integer, db.ForeignKey('course.id'), nullable=False)
+    reference = db.Column(db.String(120), nullable=False)
+    telephone_payeur = db.Column(db.String(30), nullable=False)
+    montant = db.Column(db.Integer, nullable=False)
+    statut = db.Column(db.String(50), nullable=False, default='À vérifier')
+    date_demande = db.Column(db.DateTime, default=datetime.utcnow)
+    user = db.relationship('User', backref='paiements')
+    course = db.relationship('Course', backref='paiements')
+
+
 HTML_BASE = """
 <!DOCTYPE html>
 <html lang="fr">
@@ -305,7 +318,7 @@ HTML_COURSE_DETAIL = """
         <div class="card border-0 shadow-sm rounded-4 p-3 sticky-top" style="top: 20px;">
             <h4 class="fw-bold mb-3">Enregistrer mon parcours</h4>
             <p class="text-muted">Commencez ce parcours en ligne et suivez votre progression sur votre espace personnel.</p>
-            <a href="/inscrire/{{ course.id }}" class="btn btn-acadd w-100 mb-2">S'inscrire maintenant</a>
+            <a href="/inscrire/{{ course.id }}" class="btn btn-acadd w-100 mb-2">Payer et s'inscrire</a>
             <a href="/" class="btn btn-outline-secondary w-100">Retour au catalogue</a>
         </div>
     </div>
@@ -364,6 +377,42 @@ HTML_DASHBOARD = """
     <a href="/" class="btn btn-acadd">Explorer les formations</a>
 </div>
 {% endif %}
+{% if paiements %}
+<div class="card border-0 shadow-sm rounded-4 mt-4">
+    <div class="card-body">
+        <h4 class="fw-bold">Mes demandes de paiement</h4>
+        {% for payment in paiements %}
+        <div class="d-flex justify-content-between border-bottom py-2">
+            <span>{{ payment.course.titre }} — {{ "{:,.0f}".format(payment.montant).replace(",", " ") }} FCFA</span>
+            <strong>{{ payment.statut }}</strong>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+"""
+
+HTML_PAYMENT = """
+<div class="row justify-content-center">
+    <div class="col-lg-7">
+        <div class="card border-0 shadow-sm rounded-4">
+            <div class="card-body p-4">
+                <span class="badge bg-primary-subtle text-primary-emphasis mb-2">{{ course.niveau }}</span>
+                <h2 class="fw-bold">{{ course.titre }}</h2>
+                <p class="text-muted">Montant à payer : <strong>{{ "{:,.0f}".format(course.prix).replace(",", " ") }} FCFA</strong></p>
+                <div class="alert alert-info">
+                    Transférez exactement ce montant au numéro <strong>77 089 01 47</strong> via votre service Mobile Money.
+                    Gardez la référence de transaction : elle sera vérifiée par ACADD.
+                </div>
+                <form method="POST" action="/paiement/{{ course.id }}">
+                    <div class="mb-3"><label class="form-label">Votre numéro de paiement *</label><input name="telephone_payeur" class="form-control" placeholder="Ex : 77 000 00 00" required></div>
+                    <div class="mb-3"><label class="form-label">Référence de transaction *</label><input name="reference" class="form-control" placeholder="Référence reçue après le transfert" required></div>
+                    <button class="btn btn-acadd w-100">Envoyer la demande de vérification</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
 """
 
 HTML_FORMATEUR = """
@@ -410,6 +459,12 @@ HTML_ADMIN = """
 {% endfor %}
 </div>
 {% else %}<div class="alert alert-success">Aucune formation en attente de validation.</div>{% endif %}
+<h3 class="fw-bold mt-5 mb-3">Paiements à vérifier</h3>
+{% if payments %}
+<div class="table-responsive"><table class="table table-bordered bg-white align-middle"><thead><tr><th>Apprenant</th><th>Formation</th><th>Montant</th><th>Téléphone</th><th>Référence</th><th>Action</th></tr></thead><tbody>
+{% for payment in payments %}<tr><td>{{ payment.user.nom }}</td><td>{{ payment.course.titre }}</td><td>{{ "{:,.0f}".format(payment.montant).replace(",", " ") }} FCFA</td><td>{{ payment.telephone_payeur }}</td><td>{{ payment.reference }}</td><td><form method="POST" action="/admin/paiement/{{ payment.id }}/autoriser" class="d-inline"><button class="btn btn-sm btn-success">Autoriser l'accès</button></form> <form method="POST" action="/admin/paiement/{{ payment.id }}/refuser" class="d-inline"><button class="btn btn-sm btn-outline-danger">Refuser</button></form></td></tr>{% endfor %}
+</tbody></table></div>
+{% else %}<div class="alert alert-secondary">Aucun paiement à vérifier.</div>{% endif %}
 """
 
 
@@ -515,6 +570,16 @@ def course_detail(course_id):
 @app.route('/inscrire/<int:course_id>')
 def inscrire(course_id):
     course = Course.query.get_or_404(course_id)
+    if course.validation_status != 'Approuvée':
+        flash('Cette formation n’est pas encore disponible.', 'warning')
+        return redirect(url_for('index'))
+    content = render_template_string(HTML_PAYMENT, course=course)
+    return render_template_string(HTML_BASE, body_content=content)
+
+
+@app.route('/paiement/<int:course_id>', methods=['POST'])
+def submit_payment(course_id):
+    course = Course.query.get_or_404(course_id)
     user_name = session.get('user_name', 'Apprenant')
     user = User.query.filter_by(nom=user_name).first()
     if not user:
@@ -526,15 +591,34 @@ def inscrire(course_id):
         db.session.add(user)
         db.session.commit()
 
-    exists = Enrollment.query.filter_by(user_id=user.id, course_id=course.id).first()
-    if exists:
-        flash(f'Vous êtes déjà inscrit à la formation "{course.titre}".', 'info')
+    existing = Enrollment.query.filter_by(user_id=user.id, course_id=course.id).first()
+    if existing:
+        flash(f'Vous avez déjà accès à la formation "{course.titre}".', 'info')
         return redirect(url_for('dashboard'))
 
-    enrollment = Enrollment(user_id=user.id, course_id=course.id, progress=0, statut='En cours')
-    db.session.add(enrollment)
+    pending = PaymentRequest.query.filter_by(
+        user_id=user.id, course_id=course.id, statut='À vérifier'
+    ).first()
+    if pending:
+        flash('Une demande de paiement est déjà en attente de vérification.', 'info')
+        return redirect(url_for('dashboard'))
+
+    reference = (request.form.get('reference') or '').strip()
+    telephone_payeur = (request.form.get('telephone_payeur') or '').strip()
+    if not reference or not telephone_payeur:
+        flash('Le numéro de paiement et la référence sont obligatoires.', 'danger')
+        return redirect(url_for('inscrire', course_id=course.id))
+
+    payment = PaymentRequest(
+        user_id=user.id,
+        course_id=course.id,
+        reference=reference,
+        telephone_payeur=telephone_payeur,
+        montant=int(course.prix),
+    )
+    db.session.add(payment)
     db.session.commit()
-    flash(f'Inscription réussie : {course.titre}.', 'success')
+    flash('Demande envoyée. Votre accès sera activé après vérification du paiement.', 'success')
     return redirect(url_for('dashboard'))
 
 
@@ -544,12 +628,14 @@ def dashboard():
     niveau = session.get('niveau', 'Débutant')
     user = User.query.filter_by(nom=user_name).first()
     inscriptions = []
+    paiements = []
     if user:
         niveau = user.niveau
         session['niveau'] = niveau
         inscriptions = Enrollment.query.filter_by(user_id=user.id).order_by(Enrollment.date_inscription.desc()).all()
+        paiements = PaymentRequest.query.filter_by(user_id=user.id).order_by(PaymentRequest.date_demande.desc()).all()
 
-    content = render_template_string(HTML_DASHBOARD, user_name=user_name, niveau=niveau, inscriptions=inscriptions)
+    content = render_template_string(HTML_DASHBOARD, user_name=user_name, niveau=niveau, inscriptions=inscriptions, paiements=paiements)
     return render_template_string(HTML_BASE, body_content=content)
 
 
@@ -627,7 +713,8 @@ def admin():
         """
         return render_template_string(HTML_BASE, body_content=content)
     pending = Course.query.filter_by(validation_status='En attente').order_by(Course.id.desc()).all()
-    content = render_template_string(HTML_ADMIN, pending=pending)
+    payments = PaymentRequest.query.filter_by(statut='À vérifier').order_by(PaymentRequest.date_demande.desc()).all()
+    content = render_template_string(HTML_ADMIN, pending=pending, payments=payments)
     return render_template_string(HTML_BASE, body_content=content)
 
 
@@ -644,6 +731,33 @@ def moderate_course(course_id, action):
     course.statut = 'Ouvert' if action == 'valider' else 'Refusée'
     db.session.commit()
     flash('Formation publiée.' if action == 'valider' else 'Formation refusée.', 'success' if action == 'valider' else 'warning')
+    return redirect(url_for('admin'))
+
+
+@app.route('/admin/paiement/<int:payment_id>/<action>', methods=['POST'])
+def moderate_payment(payment_id, action):
+    if not session.get('is_admin'):
+        flash('Accès administrateur requis.', 'danger')
+        return redirect(url_for('admin'))
+    payment = PaymentRequest.query.get_or_404(payment_id)
+    if payment.statut != 'À vérifier' or action not in {'autoriser', 'refuser'}:
+        flash('Action de paiement invalide.', 'danger')
+        return redirect(url_for('admin'))
+    if action == 'autoriser':
+        existing = Enrollment.query.filter_by(user_id=payment.user_id, course_id=payment.course_id).first()
+        if not existing:
+            db.session.add(Enrollment(
+                user_id=payment.user_id,
+                course_id=payment.course_id,
+                progress=0,
+                statut='Accès autorisé',
+            ))
+        payment.statut = 'Accès autorisé'
+        flash('Paiement confirmé : accès au cours autorisé.', 'success')
+    else:
+        payment.statut = 'Refusé'
+        flash('Paiement refusé : accès non accordé.', 'warning')
+    db.session.commit()
     return redirect(url_for('admin'))
 
 
