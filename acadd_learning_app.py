@@ -421,7 +421,7 @@ HTML_PAYMENT = """
                 </div>
                 <form method="POST" action="/paiement/{{ course.id }}">
                     <div class="mb-3"><label class="form-label">Votre numéro de paiement *</label><input name="telephone_payeur" class="form-control" placeholder="Ex : 77 000 00 00" required></div>
-                    <div class="mb-3"><label class="form-label">Référence de transaction *</label><input name="reference" class="form-control" placeholder="Référence reçue après le transfert" required></div>
+                    <div class="mb-3"><label class="form-label">Référence de transaction *</label><input name="reference" class="form-control" placeholder="Référence reçue après le transfert" required><div class="form-text">Après le transfert, copiez l’ID de transaction indiqué dans le SMS ou l’historique Mobile Money, puis collez-le ici.</div></div>
                     <button class="btn btn-acadd w-100">Envoyer la demande de vérification</button>
                 </form>
             </div>
