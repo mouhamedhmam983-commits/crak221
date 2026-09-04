@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from urllib.parse import urlparse
 
 from flask import Flask, flash, redirect, render_template_string, request, session, url_for
 from flask_sqlalchemy import SQLAlchemy
@@ -36,6 +37,9 @@ class Course(db.Model):
     formateur_nom = db.Column(db.String(120), nullable=True)
     formateur_email = db.Column(db.String(120), nullable=True)
     validation_status = db.Column(db.String(50), nullable=False, default='Approuvée')
+    live_date = db.Column(db.String(20), nullable=True)
+    live_time = db.Column(db.String(10), nullable=True)
+    live_url = db.Column(db.String(500), nullable=True)
     steps = db.relationship('CourseStep', backref='course', lazy=True, cascade='all, delete-orphan')
     inscriptions = db.relationship('Enrollment', backref='course', lazy=True)
 
@@ -273,6 +277,17 @@ HTML_COURSE_DETAIL = """
                             <strong>{{ course.duree_jours }} jours</strong>
                         </div>
                     </div>
+                    {% if course.live_date and course.live_time %}
+                    <div class="alert alert-primary">
+                        <strong>Cours en direct</strong><br>
+                        Date : {{ course.live_date }} à {{ course.live_time }}
+                        {% if can_access and course.live_url %}
+                        <br><a class="btn btn-acadd btn-sm mt-2" href="{{ course.live_url }}" target="_blank" rel="noopener">Rejoindre le cours en direct</a>
+                        {% elif not can_access %}
+                        <br><small>Le lien sera disponible après confirmation de votre paiement.</small>
+                        {% endif %}
+                    </div>
+                    {% endif %}
                     <div class="col-md-3">
                         <div class="bg-light rounded-3 p-3">
                             <small class="text-muted d-block">Niveau</small>
@@ -431,6 +446,9 @@ HTML_FORMATEUR = """
                         <div class="col-md-4"><label class="form-label">Niveau *</label><select name="niveau" class="form-select" required><option>Débutant</option><option>Intermédiaire</option><option>Professionnel</option></select></div>
                         <div class="col-md-4"><label class="form-label">Durée (jours) *</label><input type="number" name="duree_jours" min="1" max="365" class="form-control" required></div>
                         <div class="col-md-4"><label class="form-label">Prix (FCFA) *</label><input type="number" name="prix" min="15000" max="90000" step="1000" class="form-control" required></div>
+                        <div class="col-md-4"><label class="form-label">Date du direct *</label><input type="date" name="live_date" class="form-control" required></div>
+                        <div class="col-md-4"><label class="form-label">Heure du direct *</label><input type="time" name="live_time" class="form-control" required></div>
+                        <div class="col-md-8"><label class="form-label">Lien Google Meet, Zoom ou Jitsi *</label><input type="url" name="live_url" class="form-control" placeholder="https://..." required></div>
                         <div class="col-12"><label class="form-label">Description *</label><textarea name="description" rows="5" class="form-control" required></textarea></div>
                     </div>
                     <button class="btn btn-acadd mt-4">Soumettre à ACADD</button>
@@ -563,7 +581,11 @@ def course_detail(course_id):
     if course.validation_status != 'Approuvée':
         flash('Cette formation est encore en cours de validation.', 'warning')
         return redirect(url_for('index'))
-    content = render_template_string(HTML_COURSE_DETAIL, course=course)
+    user = User.query.filter_by(nom=session.get('user_name', 'Apprenant')).first()
+    can_access = bool(user and Enrollment.query.filter_by(
+        user_id=user.id, course_id=course.id, statut='Accès autorisé'
+    ).first())
+    content = render_template_string(HTML_COURSE_DETAIL, course=course, can_access=can_access)
     return render_template_string(HTML_BASE, body_content=content)
 
 
@@ -670,23 +692,34 @@ def formateur():
         categorie = (request.form.get('categorie') or '').strip()
         niveau = request.form.get('niveau', 'Débutant')
         description = (request.form.get('description') or '').strip()
+        live_date = (request.form.get('live_date') or '').strip()
+        live_time = (request.form.get('live_time') or '').strip()
+        live_url = (request.form.get('live_url') or '').strip()
         try:
             duree_jours = int(request.form.get('duree_jours', '0'))
             prix = int(request.form.get('prix', '0'))
         except ValueError:
             flash('La durée et le prix doivent être des nombres valides.', 'danger')
             return redirect(url_for('formateur'))
-        if not all([formateur_nom, formateur_email, titre, categorie, description]):
+        if not all([formateur_nom, formateur_email, titre, categorie, description, live_date, live_time, live_url]):
             flash('Tous les champs obligatoires doivent être remplis.', 'danger')
             return redirect(url_for('formateur'))
-        if niveau not in {'Débutant', 'Intermédiaire', 'Professionnel'} or not 1 <= duree_jours <= 365 or not 15000 <= prix <= 90000:
-            flash('Vérifiez le niveau, la durée et le prix (15 000 à 90 000 FCFA).', 'danger')
+        parsed_url = urlparse(live_url)
+        if (
+            niveau not in {'Débutant', 'Intermédiaire', 'Professionnel'}
+            or not 1 <= duree_jours <= 365
+            or not 15000 <= prix <= 90000
+            or parsed_url.scheme not in {'http', 'https'}
+            or not parsed_url.netloc
+        ):
+            flash('Vérifiez le niveau, la durée, le prix et le lien du direct.', 'danger')
             return redirect(url_for('formateur'))
         course = Course(
             titre=titre, categorie=categorie, niveau=niveau, duree_jours=duree_jours,
             public_cible='À définir', modalite='En ligne', description=description,
             prix=prix, statut='En attente', validation_status='En attente',
             formateur_nom=formateur_nom, formateur_email=formateur_email,
+            live_date=live_date, live_time=live_time, live_url=live_url,
         )
         db.session.add(course)
         db.session.commit()
@@ -777,6 +810,9 @@ def init_db():
             'formateur_nom': "ALTER TABLE course ADD COLUMN formateur_nom VARCHAR(120)",
             'formateur_email': "ALTER TABLE course ADD COLUMN formateur_email VARCHAR(120)",
             'validation_status': "ALTER TABLE course ADD COLUMN validation_status VARCHAR(50) NOT NULL DEFAULT 'Approuvée'",
+            'live_date': "ALTER TABLE course ADD COLUMN live_date VARCHAR(20)",
+            'live_time': "ALTER TABLE course ADD COLUMN live_time VARCHAR(10)",
+            'live_url': "ALTER TABLE course ADD COLUMN live_url VARCHAR(500)",
         }
         for column, statement in migrations.items():
             if column not in course_columns:
