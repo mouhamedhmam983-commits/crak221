@@ -559,9 +559,9 @@ def sitemap():
     )
 
 
-@app.route('/google09a461f016322a8f.html')
+@app.route('/google64c41f9f8a636968.html')
 def google_site_verification():
-        return Response('google-site-verification: google09a461f016322a8f.html', mimetype='text/plain')
+        return Response('google-site-verification: google64c41f9f8a636968.html', mimetype='text/plain')
     
 
 @app.route('/profil', methods=['POST', 'GET'])
