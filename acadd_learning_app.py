@@ -550,11 +550,19 @@ def sitemap():
         for course in Course.query.filter_by(validation_status='Approuvée').all()
     )
     urls = ''.join(f'<url><loc>{page}</loc></url>' for page in pages)
-    return Response(
+    
+    
+
+return Response(
         f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>',
         mimetype='application/xml',
     )
 
+
+@app.route('/google09a461f016322a8f.html')
+def google_site_verification():
+        return Response('google-site-verification: google09a461f016322a8f.html', mimetype='text/plain')
+    
 
 @app.route('/profil', methods=['POST', 'GET'])
 def profil():
