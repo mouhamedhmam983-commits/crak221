@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from urllib.parse import urlparse
 
-from flask import Flask, flash, redirect, render_template_string, request, session, url_for
+from flask import Flask, Response, flash, redirect, render_template_string, request, session, url_for
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import inspect, text
 
@@ -83,6 +83,23 @@ HTML_BASE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ACADD Learning</title>
+    <meta name="description" content="ACADD Learning : formations en ligne au Sénégal, cours numériques, espace apprenant et formations proposées par des formateurs.">
+    <meta name="keywords" content="ACADD Learning, formations en ligne Sénégal, cours numériques, formation professionnelle, apprentissage en ligne">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="{{ request.url }}">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="ACADD Learning - Formations en ligne">
+    <meta property="og:description" content="Découvrez les formations numériques et développez vos compétences avec ACADD Learning.">
+    <meta property="og:url" content="{{ request.url }}">
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "EducationalOrganization",
+      "name": "ACADD Learning",
+      "url": "{{ request.url_root }}",
+      "description": "Plateforme de formations en ligne et de cours numériques au Sénégal."
+    }
+    </script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <style>
         body { background: linear-gradient(180deg, #f4f8ff 0%, #eef3ff 100%); }
@@ -514,6 +531,29 @@ def index():
         levels=levels,
     )
     return render_template_string(HTML_BASE, body_content=content)
+
+
+@app.route('/robots.txt')
+def robots():
+    sitemap_url = url_for('sitemap', _external=True)
+    return Response(
+        f'User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /dashboard\nDisallow: /profil\nSitemap: {sitemap_url}\n',
+        mimetype='text/plain',
+    )
+
+
+@app.route('/sitemap.xml')
+def sitemap():
+    pages = [url_for('index', _external=True)]
+    pages.extend(
+        url_for('course_detail', course_id=course.id, _external=True)
+        for course in Course.query.filter_by(validation_status='Approuvée').all()
+    )
+    urls = ''.join(f'<url><loc>{page}</loc></url>' for page in pages)
+    return Response(
+        f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>',
+        mimetype='application/xml',
+    )
 
 
 @app.route('/profil', methods=['POST', 'GET'])
